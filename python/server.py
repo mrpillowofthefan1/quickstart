@@ -4,7 +4,6 @@ import os
 import datetime as dt
 import json
 import time
-from datetime import date, timedelta
 import uuid
 
 from dotenv import load_dotenv
@@ -42,19 +41,14 @@ from plaid.model.item_get_request import ItemGetRequest
 from plaid.model.institutions_get_by_id_request import InstitutionsGetByIdRequest
 from plaid.model.transfer_authorization_create_request import TransferAuthorizationCreateRequest
 from plaid.model.transfer_create_request import TransferCreateRequest
-from plaid.model.transfer_get_request import TransferGetRequest
 from plaid.model.transfer_network import TransferNetwork
 from plaid.model.transfer_type import TransferType
 from plaid.model.transfer_authorization_user_in_request import TransferAuthorizationUserInRequest
 from plaid.model.ach_class import ACHClass
-from plaid.model.transfer_create_idempotency_key import TransferCreateIdempotencyKey
 from plaid.model.transfer_user_address_in_request import TransferUserAddressInRequest
 from plaid.model.signal_evaluate_request import SignalEvaluateRequest
 from plaid.model.statements_list_request import StatementsListRequest
-from plaid.model.link_token_create_request_statements import LinkTokenCreateRequestStatements
-from plaid.model.link_token_create_request_cra_options import LinkTokenCreateRequestCraOptions
 from plaid.model.statements_download_request import StatementsDownloadRequest
-from plaid.model.consumer_report_permissible_purpose import ConsumerReportPermissiblePurpose
 from plaid.model.cra_check_report_base_report_get_request import CraCheckReportBaseReportGetRequest
 from plaid.model.cra_check_report_pdf_get_request import CraCheckReportPDFGetRequest
 from plaid.model.cra_check_report_income_insights_get_request import CraCheckReportIncomeInsightsGetRequest
@@ -64,7 +58,6 @@ from plaid.api import plaid_api
 
 load_dotenv()
 
-
 app = Flask(__name__)
 
 PLAID_CLIENT_ID = os.getenv('PLAID_CLIENT_ID')
@@ -73,45 +66,24 @@ PLAID_ENV = os.getenv('PLAID_ENV', 'sandbox')
 PLAID_PRODUCTS = os.getenv('PLAID_PRODUCTS', 'transactions').split(',')
 PLAID_COUNTRY_CODES = os.getenv('PLAID_COUNTRY_CODES', 'US').split(',')
 
-def empty_to_none(field):
-    value = os.getenv(field)
-    if value is None or len(value) == 0:
-        return None
-    return value
+# Determine Plaid environment
+host = plaid.Environment.Sandbox if PLAID_ENV == 'sandbox' else plaid.Environment.Production
 
-host = plaid.Environment.Sandbox
+# Optional Redirect URI
+PLAID_REDIRECT_URI = os.getenv('PLAID_REDIRECT_URI', None)
 
-if PLAID_ENV == 'sandbox':
-    host = plaid.Environment.Sandbox
-
-if PLAID_ENV == 'production':
-    host = plaid.Environment.Production
-
-# Parameters used for the OAuth redirect Link flow.
-#
-# Set PLAID_REDIRECT_URI to 'http://localhost:3000/'
-# The OAuth redirect flow requires an endpoint on the developer's website
-# that the bank website should redirect to. You will need to configure
-# this redirect URI for your client ID through the Plaid developer dashboard
-# at https://dashboard.plaid.com/team/api.
-PLAID_REDIRECT_URI = empty_to_none('PLAID_REDIRECT_URI')
-
+# Configure API Client
 configuration = plaid.Configuration(
     host=host,
     api_key={
         'clientId': PLAID_CLIENT_ID,
         'secret': PLAID_SECRET,
         'plaidVersion': '2020-09-14'
-    }
+    },
 )
 
 api_client = plaid.ApiClient(configuration)
 client = plaid_api.PlaidApi(api_client)
-
-products = []
-for product in PLAID_PRODUCTS:
-    products.append(Products(product))
-
 
 # We store the access_token in memory - in production, store it in a secure
 # persistent data store.
@@ -172,11 +144,11 @@ def create_link_token_for_payment():
             request
         )
         pretty_print_response(response.to_dict())
-        
+
         # We store the payment_id in memory for demo purposes - in production, store it in a secure
         # persistent data store along with the Payment metadata, such as userId.
         payment_id = response['payment_id']
-        
+
         linkRequest = LinkTokenCreateRequest(
             # The 'payment_initiation' product has to be the only element in the 'products' list.
             products=[Products('payment_initiation')],
@@ -189,14 +161,16 @@ def create_link_token_for_payment():
                 # Typically, this will be a user ID number from your application.
                 # Personally identifiable information, such as an email address or phone number, should not be used here.
                 client_user_id=str(time.time())
+
             ),
+            redirect_uri=PLAID_REDIRECT_URI,
             payment_initiation=LinkTokenCreateRequestPaymentInitiation(
                 payment_id=payment_id
             )
         )
 
-        if PLAID_REDIRECT_URI!=None:
-            linkRequest['redirect_uri']=PLAID_REDIRECT_URI
+        if PLAID_REDIRECT_URI != None:
+            linkRequest['redirect_uri'] = PLAID_REDIRECT_URI
         linkResponse = client.link_token_create(linkRequest)
         pretty_print_response(linkResponse.to_dict())
         return jsonify(linkResponse.to_dict())
@@ -206,39 +180,20 @@ def create_link_token_for_payment():
 
 @app.route('/api/create_link_token', methods=['POST'])
 def create_link_token():
-    global user_token
-    try:
-        request = LinkTokenCreateRequest(
-            products=products,
-            client_name="Plaid Quickstart",
-            country_codes=list(map(lambda x: CountryCode(x), PLAID_COUNTRY_CODES)),
-            language='en',
-            user=LinkTokenCreateRequestUser(
-                client_user_id=str(time.time())
-            )
-        )
-        if PLAID_REDIRECT_URI!=None:
-            request['redirect_uri']=PLAID_REDIRECT_URI
-        if Products('statements') in products:
-            statements=LinkTokenCreateRequestStatements(
-                end_date=date.today(),
-                start_date=date.today()-timedelta(days=30)
-            )
-            request['statements']=statements
+    request = LinkTokenCreateRequest(
+        user=LinkTokenCreateRequestUser(
+            client_user_id=str(time.time())  # Use a unique identifier
+        ),
+        client_name="Plaid Quickstart",  # Ensure this is a valid string
+        products=[Products("auth")],  # Pass the list directly
+        country_codes=[CountryCode("US")],  # Ensure this is a valid list of country codes
+        language="en",  # Ensure this is a valid string
+        webhook="https://your-webhook-url.com"  # Optional: update or remove if unnecessary
+    )
+    # Create the link token
+    response = client.link_token_create(request)
+    return jsonify(response.to_dict())  # Return the response as JSON
 
-        cra_products = ["cra_base_report", "cra_income_insights", "cra_partner_insights"]
-        if any(product in cra_products for product in PLAID_PRODUCTS):
-            request['user_token'] = user_token
-            request['consumer_report_permissible_purpose'] = ConsumerReportPermissiblePurpose('ACCOUNT_REVIEW_CREDIT')
-            request['cra_options'] = LinkTokenCreateRequestCraOptions(
-                days_requested=60
-            )
-    # create link token
-        response = client.link_token_create(request)
-        return jsonify(response.to_dict())
-    except plaid.ApiException as e:
-        print(e)
-        return json.loads(e.body)
 
 # Create a user token which can be used for Plaid Check, Income, or Multi-Item link flows
 # https://plaid.com/docs/api/users/#usercreate
@@ -248,7 +203,7 @@ def create_user_token():
     try:
         consumer_report_user_identity = None
         user_create_request = UserCreateRequest(
-            # Typically this will be a user ID number from your application. 
+            # Typically this will be a user ID number from your application.
             client_user_id="user_" + str(uuid.uuid4())
         )
 
@@ -257,9 +212,9 @@ def create_user_token():
             consumer_report_user_identity = ConsumerReportUserIdentity(
                 first_name="Harry",
                 last_name="Potter",
-                phone_numbers= ['+16174567890'],
-                emails= ['harrypotter@example.com'],
-                primary_address= {
+                phone_numbers=['+16174567890'],
+                emails=['harrypotter@example.com'],
+                primary_address={
                     "city": 'New York',
                     "region": 'NY',
                     "street": '4 Privet Drive',
@@ -287,16 +242,44 @@ def get_access_token():
     global access_token
     global item_id
     global transfer_id
-    public_token = request.form['public_token']
+
+    # Get the public_token from the request body
+    public_token = request.form.get('public_token', None)
+
+    # Validate the public token
+    if not public_token:
+        return jsonify({'error': 'Public token is missing'}), 400
+
     try:
-        exchange_request = ItemPublicTokenExchangeRequest(
-            public_token=public_token)
-        exchange_response = client.item_public_token_exchange(exchange_request)
-        access_token = exchange_response['access_token']
-        item_id = exchange_response['item_id']
-        return jsonify(exchange_response.to_dict())
+        # Create a request object for exchanging the public token
+        exchange_request = ItemPublicTokenExchangeRequest(public_token=public_token)
+
+        # Call the Plaid API to exchange the public token
+        exchange_response = client.item_public_token_exchange(exchange_request).to_dict()
+
+        # Check if the response contains both access_token and item_id
+        if 'access_token' in exchange_response and 'item_id' in exchange_response:
+            access_token = exchange_response['access_token']
+            item_id = exchange_response['item_id']
+
+            # Optional: Print for debugging (remove in production)
+            print(f"Access Token: {access_token}")
+            print(f"Item ID: {item_id}")
+
+            return jsonify(exchange_response)
+
+        else:
+            print("Access token or item ID missing in response.")
+            return jsonify({'error': 'Failed to retrieve access token or item ID'}), 400
+
     except plaid.ApiException as e:
-        return json.loads(e.body)
+        # Handle the Plaid API exception
+        error_response = json.loads(e.body)
+
+        # Log the error (for debugging purposes)
+        print(f"Plaid API Error: {error_response}")
+
+        return jsonify({'error': error_response}), 400
 
 
 # Retrieve ACH or ETF account numbers for an Item
@@ -306,12 +289,12 @@ def get_access_token():
 @app.route('/api/auth', methods=['GET'])
 def get_auth():
     try:
-       request = AuthGetRequest(
+        request = AuthGetRequest(
             access_token=access_token
         )
-       response = client.auth_get(request)
-       pretty_print_response(response.to_dict())
-       return jsonify(response.to_dict())
+        response = client.auth_get(request)
+        pretty_print_response(response.to_dict())
+        return jsonify(response.to_dict())
     except plaid.ApiException as e:
         error_response = format_error(e)
         return jsonify(error_response)
@@ -329,7 +312,7 @@ def get_transactions():
     # New transaction updates since "cursor"
     added = []
     modified = []
-    removed = [] # Removed transaction ids
+    removed = []  # Removed transaction ids
     has_more = True
     try:
         # Iterate through each page of new transaction updates for item
@@ -341,14 +324,14 @@ def get_transactions():
             response = client.transactions_sync(request).to_dict()
             cursor = response['next_cursor']
             # If no transactions are available yet, wait and poll the endpoint.
-            # Normally, we would listen for a webhook, but the Quickstart doesn't 
-            # support webhooks. For a webhook example, see 
+            # Normally, we would listen for a webhook, but the Quickstart doesn't
+            # support webhooks. For a webhook example, see
             # https://github.com/plaid/tutorial-resources or
             # https://github.com/plaid/pattern
             if cursor == '':
                 time.sleep(2)
-                continue  
-            # If cursor is not an empty string, we got results, 
+                continue
+                # If cursor is not an empty string, we got results,
             # so add this page of results
             added.extend(response['added'])
             modified.extend(response['modified'])
@@ -517,12 +500,13 @@ def get_investments_transactions():
         error_response = format_error(e)
         return jsonify(error_response)
 
+
 # This functionality is only relevant for the ACH Transfer product.
 # Authorize a transfer
 
 @app.route('/api/transfer_authorize', methods=['GET'])
 def transfer_authorization():
-    global authorization_id 
+    global authorization_id
     global account_id
     request = AccountsGetRequest(access_token=access_token)
     response = client.accounts_get(request)
@@ -555,6 +539,7 @@ def transfer_authorization():
         error_response = format_error(e)
         return jsonify(error_response)
 
+
 # Create Transfer for a specified Transfer ID
 
 @app.route('/api/transfer_create', methods=['GET'])
@@ -571,6 +556,7 @@ def transfer():
     except plaid.ApiException as e:
         error_response = format_error(e)
         return jsonify(error_response)
+
 
 @app.route('/api/statements', methods=['GET'])
 def statements():
@@ -595,8 +581,6 @@ def statements():
     except plaid.ApiException as e:
         error_response = format_error(e)
         return jsonify(error_response)
-
-
 
 
 @app.route('/api/signal_evaluate', methods=['GET'])
@@ -658,6 +642,7 @@ def item():
         error_response = format_error(e)
         return jsonify(error_response)
 
+
 # Retrieve CRA Base Report and PDF
 # Base report: https://plaid.com/docs/check/api/#cracheck_reportbase_reportget
 # PDF: https://plaid.com/docs/check/api/#cracheck_reportpdfget
@@ -680,6 +665,7 @@ def cra_check_report():
         error_response = format_error(e)
         return jsonify(error_response)
 
+
 # Retrieve CRA Income Insights and PDF with Insights
 # Income insights: https://plaid.com/docs/check/api/#cracheck_reportincome_insightsget
 # PDF w/ income insights: https://plaid.com/docs/check/api/#cracheck_reportpdfget
@@ -688,7 +674,7 @@ def cra_income_insights():
     try:
         get_response = poll_with_retries(lambda: client.cra_check_report_income_insights_get(
             CraCheckReportIncomeInsightsGetRequest(user_token=user_token))
-        )
+                                         )
         pretty_print_response(get_response.to_dict())
 
         pdf_response = client.cra_check_report_pdf_get(
@@ -702,6 +688,7 @@ def cra_income_insights():
     except plaid.ApiException as e:
         error_response = format_error(e)
         return jsonify(error_response)
+
 
 # Retrieve CRA Partner Insights
 # https://plaid.com/docs/check/api/#cracheck_reportpartner_insightsget
@@ -717,6 +704,7 @@ def cra_partner_insights():
     except plaid.ApiException as e:
         error_response = format_error(e)
         return jsonify(error_response)
+
 
 # Since this quickstart does not support webhooks, this function can be used to poll
 # an API that would otherwise be triggered by a webhook.
@@ -737,13 +725,16 @@ def poll_with_retries(request_callback, ms=1000, retries_left=20):
                 retries_left -= 1
                 time.sleep(ms / 1000)
 
+
 def pretty_print_response(response):
-  print(json.dumps(response, indent=2, sort_keys=True, default=str))
+    print(json.dumps(response, indent=2, sort_keys=True, default=str))
+
 
 def format_error(e):
     response = json.loads(e.body)
     return {'error': {'status_code': e.status, 'display_message':
-                      response['error_message'], 'error_code': response['error_code'], 'error_type': response['error_type']}}
+        response['error_message'], 'error_code': response['error_code'], 'error_type': response['error_type']}}
+
 
 if __name__ == '__main__':
     app.run(port=int(os.getenv('PORT', 8000)))
